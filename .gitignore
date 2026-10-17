@@ -1,0 +1,6 @@
+# build output
+/opencode-egress-router
+/opencode-egress-router-*
+*.bak*
+# local tooling
+.open-mem/
