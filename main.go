@@ -8,11 +8,13 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -192,14 +194,39 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500) {
 			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 160))
 			resp.Body.Close()
-			log.Printf("[%s] %d on attempt %d/%d, retrying on a new circuit: %q", b.name, resp.StatusCode, t.n, b.attempts, snippet)
+			log.Printf("[%s] %d on attempt %d/%d, retrying on a new circuit: model=%s body=%q", b.name, resp.StatusCode, t.n, b.attempts, modelOf(bodyBytes), snippet)
 			continue
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests && i < len(tries)-1 {
+			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 160))
 			resp.Body.Close()
+			// Log WHY: the body tells an IP rate limit apart from provider
+			// overload ("Upstream request failed: Endpoint is unavailable"),
+			// which no amount of egress rotation can fix.
+			log.Printf("[%s] 429 model=%s%s body=%q", b.name, modelOf(bodyBytes), limitHeaders(resp.Header), snippet)
 			b.markLimited(cooldown)
 			continue
+		}
+
+		// Error bodies are small: buffer them so the reason is logged and
+		// still forwarded to the caller unchanged.
+		if resp.StatusCode >= 400 {
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+			resp.Body.Close()
+			log.Printf("[%s] %s %s -> %d%s model=%s%s body=%q", b.name, r.Method, r.URL.Path, resp.StatusCode,
+				zenTag(zenApplied), modelOf(bodyBytes), limitHeaders(resp.Header), truncate(errBody, 160))
+			for k, vv := range resp.Header {
+				if strings.EqualFold(k, "Content-Length") {
+					continue
+				}
+				for _, v := range vv {
+					w.Header().Add(k, v)
+				}
+			}
+			w.WriteHeader(resp.StatusCode)
+			w.Write(errBody)
+			return
 		}
 
 		log.Printf("[%s] %s %s -> %d%s", b.name, r.Method, r.URL.Path, resp.StatusCode, zenTag(zenApplied))
@@ -248,6 +275,41 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Error(w, "all backends failed: "+errString(lastErr), http.StatusBadGateway)
+}
+
+// modelOf extracts the "model" field from a JSON request body ("?" if absent).
+func modelOf(body []byte) string {
+	var v struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(body, &v) != nil || v.Model == "" {
+		return "?"
+	}
+	return v.Model
+}
+
+// limitHeaders renders Retry-After and any *ratelimit* response headers, so a
+// per-IP / per-key limit is distinguishable from upstream overload in the log.
+func limitHeaders(h http.Header) string {
+	var parts []string
+	for k, vv := range h {
+		lk := strings.ToLower(k)
+		if lk == "retry-after" || strings.Contains(lk, "ratelimit") {
+			parts = append(parts, lk+"="+strings.Join(vv, ","))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	sort.Strings(parts)
+	return " " + strings.Join(parts, " ")
+}
+
+func truncate(b []byte, n int) []byte {
+	if len(b) > n {
+		return b[:n]
+	}
+	return b
 }
 
 func zenTag(applied bool) string {

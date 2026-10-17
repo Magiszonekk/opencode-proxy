@@ -83,6 +83,17 @@ Flags:
 
 Each response is logged as `[backend] POST /chat/completions -> <code> (zenfix)`.
 The `(zenfix)` tag means the gate rewrite was applied.
+Errors (>= 400) and every 429 that triggers a failover are also logged with the
+model, `Retry-After` / `*ratelimit*` headers and the first 160 bytes of the
+body, e.g.
+
+```
+[direct] 429 model=deepseek-v4.1-flash-free retry-after=30 body="..."
+```
+
+Use it to tell a per-IP rate limit (own proxies help) from upstream overload
+such as `Upstream request failed: Endpoint is unavailable.` (no egress rotation
+helps; retry later or switch model).
 
 ## CLIProxyAPI config
 

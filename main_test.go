@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -89,5 +92,40 @@ func TestDirect403IsReturnedNotRetried(t *testing.T) {
 	tor, st := mk("via-tor", 3, 200)
 	if got := serve(newRouter(d, tor)); got != 403 || st.called != 0 {
 		t.Fatalf("got %d, tor calls %d", got, st.called)
+	}
+}
+
+// bodyRT answers with a fixed status, headers and body.
+type bodyRT struct {
+	code int
+	hdr  http.Header
+	body string
+}
+
+func (b bodyRT) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: b.code, Header: b.hdr.Clone(), Body: io.NopCloser(strings.NewReader(b.body))}, nil
+}
+
+// 429 reasons are logged with model, rate-limit headers and body; the final
+// error body is still forwarded to the caller intact.
+func TestErrorReasonsAreLoggedAndForwarded(t *testing.T) {
+	cooldown = time.Minute
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	d := &backend{name: "direct", client: &http.Client{Transport: bodyRT{429, http.Header{"Retry-After": {"30"}}, `{"error":{"message":"Endpoint is unavailable."}}`}}}
+	o := &backend{name: "via-ovh", client: &http.Client{Transport: bodyRT{400, http.Header{"Content-Type": {"application/json"}}, `{"error":"bad model"}`}}}
+	rec := httptest.NewRecorder()
+	newRouter(d, o).ServeHTTP(rec, httptest.NewRequest("POST", "/models", strings.NewReader(`{"model":"paid-x"}`)))
+
+	if rec.Code != 400 || rec.Body.String() != `{"error":"bad model"}` {
+		t.Fatalf("forwarded %d %q", rec.Code, rec.Body.String())
+	}
+	out := logBuf.String()
+	for _, want := range []string{"[direct] 429 model=paid-x retry-after=30", "Endpoint is unavailable.", "[via-ovh] POST /models -> 400 model=paid-x", "bad model"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log missing %q:\n%s", want, out)
+		}
 	}
 }
