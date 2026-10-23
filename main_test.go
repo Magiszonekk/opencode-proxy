@@ -129,3 +129,29 @@ func TestErrorReasonsAreLoggedAndForwarded(t *testing.T) {
 		}
 	}
 }
+
+// The second Oracle IP is one more stop before Tor, used only when the first three 429.
+func TestOracle2BeforeTor(t *testing.T) {
+	cooldown = time.Minute
+	d, _ := mk("direct", 0, 429)
+	o, _ := mk("via-ovh", 0, 429)
+	r, _ := mk("via-oracle", 0, 429)
+	r2, sr2 := mk("via-oracle2", 0, 200)
+	tor, st := mk("via-tor", 3, 200)
+	if got := serve(newRouter(d, o, r, r2, tor)); got != 200 {
+		t.Fatalf("want 200 via oracle2, got %d", got)
+	}
+	if sr2.called != 1 || st.called != 0 {
+		t.Fatalf("calls oracle2=%d tor=%d", sr2.called, st.called)
+	}
+}
+
+// A socks5:// URL is accepted for proxied backends.
+func TestProxiedBackendAcceptsSocks5(t *testing.T) {
+	b := newProxiedBackend("via-oracle2", "socks5://127.0.0.1:1")
+	req, _ := http.NewRequest("GET", "https://example.invalid/", nil)
+	u, err := b.client.Transport.(*http.Transport).Proxy(req)
+	if err != nil || u.Scheme != "socks5" {
+		t.Fatalf("proxy=%v err=%v", u, err)
+	}
+}

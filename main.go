@@ -353,10 +353,11 @@ func main() {
 	upstreamURL := flag.String("upstream", "https://opencode.ai/zen/v1", "real upstream base URL")
 	ovhProxyURL := flag.String("ovh-proxy", "http://10.8.0.1:8888", "HTTP proxy on OVH box for the fallback egress path")
 	oracleProxyURL := flag.String("oracle-proxy", "", "optional third egress backend (HTTP proxy, e.g. on Oracle VPS); skipped if empty")
+	oracle2ProxyURL := flag.String("oracle2-proxy", "", "optional egress backend tried after -oracle-proxy, e.g. the Oracle VPS's second public IP (http:// or socks5:// URL); skipped if empty")
 	cooldownFlag := flag.Duration("cooldown", 60*time.Second, "how long to avoid a backend after it returns 429")
 	torSocks := flag.String("tor-socks", "", "Tor SOCKS5 address (e.g. 127.0.0.1:9050) used as the LAST egress backend, new circuit per request; skipped if empty")
 	torAttempts := flag.Int("tor-attempts", 3, "how many fresh Tor circuits to try before giving up")
-	testOnly := flag.String("test-only-backend", "", "debug: route everything through this one backend (direct|via-ovh|via-oracle|via-tor)")
+	testOnly := flag.String("test-only-backend", "", "debug: route everything through this one backend (direct|via-ovh|via-oracle|via-oracle2|via-tor)")
 	flag.Parse()
 
 	cooldown = *cooldownFlag
@@ -375,6 +376,9 @@ func main() {
 	}
 	if *oracleProxyURL != "" {
 		rt.backends = append(rt.backends, newProxiedBackend("via-oracle", *oracleProxyURL))
+	}
+	if *oracle2ProxyURL != "" {
+		rt.backends = append(rt.backends, newProxiedBackend("via-oracle2", *oracle2ProxyURL))
 	}
 	if *torSocks != "" {
 		rt.backends = append(rt.backends, newTorBackend(*torSocks, *torAttempts))

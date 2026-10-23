@@ -15,7 +15,7 @@ It does two things:
    unchanged.
 2. **Egress failover.** When the current egress path gets `429`, it is parked
    for `-cooldown` and the same request is retried through the next backend:
-   `direct -> -ovh-proxy -> -oracle-proxy -> -tor-socks`.
+   `direct -> -ovh-proxy -> -oracle-proxy -> -oracle2-proxy -> -tor-socks`.
 
 ## Current gate (measured 2026-10-14, re-verified 2026-10-17, opencode 1.18.32)
 
@@ -64,6 +64,7 @@ go vet . && go test ./... && go build -o opencode-egress-router .
   -upstream https://opencode.ai/zen/v1 \
   -ovh-proxy http://<your-proxy-1>:<port> \
   -oracle-proxy http://user:pass@<your-proxy-2>:<port> \
+  -oracle2-proxy socks5://127.0.0.1:<tunnel-port> \
   -cooldown 60s
   # -tor-socks 127.0.0.1:9050 -tor-attempts 3   # currently useless, see above
 ```
@@ -76,10 +77,11 @@ Flags:
 | `-upstream` | `https://opencode.ai/zen/v1` | real upstream base URL |
 | `-ovh-proxy` | `http://10.8.0.1:8888` | 2nd egress (HTTP proxy) |
 | `-oracle-proxy` | empty | 3rd egress (HTTP proxy), skipped if empty |
+| `-oracle2-proxy` | empty | 4th egress (`http://` or `socks5://`), e.g. a second public IP of the same box; skipped if empty |
 | `-tor-socks` | empty | last egress, Tor SOCKS5, new circuit per request |
 | `-tor-attempts` | `3` | fresh Tor circuits to try |
 | `-cooldown` | `60s` | how long a 429'd backend is skipped |
-| `-test-only-backend` | empty | debug: force one backend (`direct`, `via-ovh`, `via-oracle`, `via-tor`) |
+| `-test-only-backend` | empty | debug: force one backend (`direct`, `via-ovh`, `via-oracle`, `via-oracle2`, `via-tor`) |
 
 Each response is logged as `[backend] POST /chat/completions -> <code> (zenfix)`.
 The `(zenfix)` tag means the gate rewrite was applied.
