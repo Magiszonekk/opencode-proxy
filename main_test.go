@@ -194,3 +194,17 @@ func TestIPv4TwinBackendConfig(t *testing.T) {
 		t.Fatal("direct-v4 must use a tcp4 dialer")
 	}
 }
+
+func TestIPv4FirstOrder(t *testing.T) {
+	n := func(name string, v4 bool) *backend { return &backend{name: name, ipv4: v4} }
+	in := []*backend{n("direct", false), n("direct-v4", true), n("via-ovh", false), n("via-ovh-v4", true),
+		n("via-oracle", false), n("via-oracle-v4", true), n("via-oracle2", false), n("via-tor", false)}
+	var got []string
+	for _, b := range ipv4FirstOrder(in) {
+		got = append(got, b.name)
+	}
+	want := "direct-v4 via-ovh-v4 via-oracle-v4 via-oracle2 direct via-ovh via-oracle via-tor"
+	if strings.Join(got, " ") != want {
+		t.Fatalf("order %v", got)
+	}
+}

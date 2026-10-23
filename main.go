@@ -102,6 +102,24 @@ var (
 	}
 )
 
+// ipv4FirstOrder moves the IPv4 egresses (twins, plus via-oracle2 which only
+// has an IPv4 address) ahead of the dual-stack ones, keeping relative order and
+// Tor last. Zen's IPv6 quota is per /64 and burns first otherwise.
+func ipv4FirstOrder(bs []*backend) []*backend {
+	var v4, v6, tor []*backend
+	for _, b := range bs {
+		switch {
+		case b.name == "via-tor":
+			tor = append(tor, b)
+		case b.ipv4 || b.name == "via-oracle2":
+			v4 = append(v4, b)
+		default:
+			v6 = append(v6, b)
+		}
+	}
+	return append(append(v4, v6...), tor...)
+}
+
 // upstreamIPv4 returns an A record of host, cached for a few minutes.
 func upstreamIPv4(host string) (string, error) {
 	v4Mu.Lock()
@@ -445,6 +463,7 @@ func main() {
 	torSocks := flag.String("tor-socks", "", "Tor SOCKS5 address (e.g. 127.0.0.1:9050) used as the LAST egress backend, new circuit per request; skipped if empty")
 	torAttempts := flag.Int("tor-attempts", 3, "how many fresh Tor circuits to try before giving up")
 	ipv4Twins := flag.Bool("ipv4-twins", false, "after each of direct / -ovh-proxy / -oracle-proxy, also try the same egress forced to IPv4 (direct-v4, via-ovh-v4, via-oracle-v4): a dual-stack egress otherwise only ever uses its IPv6 address")
+	ipv4First := flag.Bool("ipv4-first", false, "with -ipv4-twins: try every IPv4 egress (the twins and -oracle2-proxy) before the IPv6 ones; Tor stays last")
 	testOnly := flag.String("test-only-backend", "", "debug: route everything through this one backend (direct|direct-v4|via-ovh|via-ovh-v4|via-oracle|via-oracle-v4|via-oracle2|via-tor)")
 	flag.Parse()
 
@@ -476,6 +495,9 @@ func main() {
 	}
 	if *torSocks != "" {
 		rt.backends = append(rt.backends, newTorBackend(*torSocks, *torAttempts))
+	}
+	if *ipv4First {
+		rt.backends = ipv4FirstOrder(rt.backends)
 	}
 	if *testOnly != "" {
 		var keep []*backend

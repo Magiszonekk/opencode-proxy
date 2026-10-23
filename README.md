@@ -22,6 +22,8 @@ It does two things:
    counts the daily free quota per IPv6 /64: the IPv4 address of each box is a separate,
    otherwise unused quota. A twin sends the request to an A record of the upstream (Host
    and TLS SNI stay the hostname), so even an HTTP proxy CONNECTs over IPv4.
+   `-ipv4-first` (prod) moves every IPv4 egress ahead of the IPv6 ones:
+   `direct-v4 -> via-ovh-v4 -> via-oracle-v4 -> via-oracle2 -> direct -> via-ovh -> via-oracle -> via-tor`.
 
 ## Current gate (measured 2026-10-14, re-verified 2026-10-17, opencode 1.18.32)
 
