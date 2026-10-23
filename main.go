@@ -6,12 +6,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -28,6 +31,13 @@ type backend struct {
 	// attempts > 1 retries a 429 on the same backend; only useful when every
 	// attempt leaves from a different IP (Tor, one fresh circuit per request).
 	attempts int
+	// ipv4 forces the upstream connection over IPv4: the request goes to an A
+	// record of the upstream host (TLS SNI and Host stay the hostname). Zen is
+	// dual-stack, so a dual-stack egress (home, OVH, Oracle) otherwise always
+	// leaves via IPv6 and its IPv4 address - with its own per-IP free quota -
+	// is never used. Zen counts the quota per IPv6 /64, so rotating addresses
+	// inside one /64 does not help; the IPv4 address does.
+	ipv4 bool
 }
 
 func (b *backend) available(now time.Time) bool {
@@ -48,6 +58,66 @@ func newDirectBackend() *backend {
 		name:   "direct",
 		client: &http.Client{Transport: &http.Transport{}},
 	}
+}
+
+// newIPv4Backend is the IPv4 twin of a direct (proxyURL == "") or proxied
+// backend. The URL host is rewritten to an IPv4 literal per request (see
+// upstreamIPv4), so an HTTP proxy CONNECTs to that address and cannot pick
+// AAAA; the direct dialer additionally only dials tcp4.
+func newIPv4Backend(name, proxyURL, serverName string) *backend {
+	tr := &http.Transport{
+		TLSClientConfig:   &tls.Config{ServerName: serverName},
+		ForceAttemptHTTP2: true,
+	}
+	if proxyURL == "" {
+		d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		tr.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
+			return d.DialContext(ctx, "tcp4", addr)
+		}
+	} else {
+		u, err := url.Parse(proxyURL)
+		if err != nil {
+			log.Fatalf("invalid proxy url for backend %s: %v", name, err)
+		}
+		tr.Proxy = http.ProxyURL(u)
+	}
+	return &backend{name: name, client: &http.Client{Transport: tr}, ipv4: true}
+}
+
+var (
+	v4Mu    sync.Mutex
+	v4Addr  string
+	v4At    time.Time
+	v4Cache = 5 * time.Minute
+	// lookupIPv4 is swapped in tests.
+	lookupIPv4 = func(host string) (string, error) {
+		ips, err := net.DefaultResolver.LookupIP(context.Background(), "ip4", host)
+		if err != nil {
+			return "", err
+		}
+		if len(ips) == 0 {
+			return "", &net.DNSError{Err: "no A record", Name: host}
+		}
+		return ips[0].String(), nil
+	}
+)
+
+// upstreamIPv4 returns an A record of host, cached for a few minutes.
+func upstreamIPv4(host string) (string, error) {
+	v4Mu.Lock()
+	defer v4Mu.Unlock()
+	if v4Addr != "" && time.Since(v4At) < v4Cache {
+		return v4Addr, nil
+	}
+	ip, err := lookupIPv4(host)
+	if err != nil {
+		if v4Addr != "" {
+			return v4Addr, nil // stale beats nothing
+		}
+		return "", err
+	}
+	v4Addr, v4At = ip, time.Now()
+	return ip, nil
 }
 
 func newProxiedBackend(name, proxyURL string) *backend {
@@ -160,7 +230,24 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 	for i, t := range tries {
 		b := t.b
-		req, err := http.NewRequest(r.Method, target.String(), bytes.NewReader(bodyBytes))
+		reqURL := target
+		if b.ipv4 {
+			ip, errIP := upstreamIPv4(rt.upstream.Hostname())
+			if errIP != nil {
+				log.Printf("[%s] no IPv4 for upstream: %v", b.name, errIP)
+				lastErr = errIP
+				continue
+			}
+			port := rt.upstream.Port()
+			if port == "" {
+				port = "443"
+				if rt.upstream.Scheme == "http" {
+					port = "80"
+				}
+			}
+			reqURL.Host = net.JoinHostPort(ip, port)
+		}
+		req, err := http.NewRequest(r.Method, reqURL.String(), bytes.NewReader(bodyBytes))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -357,7 +444,8 @@ func main() {
 	cooldownFlag := flag.Duration("cooldown", 60*time.Second, "how long to avoid a backend after it returns 429")
 	torSocks := flag.String("tor-socks", "", "Tor SOCKS5 address (e.g. 127.0.0.1:9050) used as the LAST egress backend, new circuit per request; skipped if empty")
 	torAttempts := flag.Int("tor-attempts", 3, "how many fresh Tor circuits to try before giving up")
-	testOnly := flag.String("test-only-backend", "", "debug: route everything through this one backend (direct|via-ovh|via-oracle|via-oracle2|via-tor)")
+	ipv4Twins := flag.Bool("ipv4-twins", false, "after each of direct / -ovh-proxy / -oracle-proxy, also try the same egress forced to IPv4 (direct-v4, via-ovh-v4, via-oracle-v4): a dual-stack egress otherwise only ever uses its IPv6 address")
+	testOnly := flag.String("test-only-backend", "", "debug: route everything through this one backend (direct|direct-v4|via-ovh|via-ovh-v4|via-oracle|via-oracle-v4|via-oracle2|via-tor)")
 	flag.Parse()
 
 	cooldown = *cooldownFlag
@@ -367,15 +455,21 @@ func main() {
 		log.Fatalf("invalid upstream url: %v", err)
 	}
 
-	rt := &router{
-		upstream: upstream,
-		backends: []*backend{
-			newDirectBackend(),
-			newProxiedBackend("via-ovh", *ovhProxyURL),
-		},
+	rt := &router{upstream: upstream}
+	sni := upstream.Hostname()
+	rt.backends = append(rt.backends, newDirectBackend())
+	if *ipv4Twins {
+		rt.backends = append(rt.backends, newIPv4Backend("direct-v4", "", sni))
+	}
+	rt.backends = append(rt.backends, newProxiedBackend("via-ovh", *ovhProxyURL))
+	if *ipv4Twins {
+		rt.backends = append(rt.backends, newIPv4Backend("via-ovh-v4", *ovhProxyURL, sni))
 	}
 	if *oracleProxyURL != "" {
 		rt.backends = append(rt.backends, newProxiedBackend("via-oracle", *oracleProxyURL))
+		if *ipv4Twins {
+			rt.backends = append(rt.backends, newIPv4Backend("via-oracle-v4", *oracleProxyURL, sni))
+		}
 	}
 	if *oracle2ProxyURL != "" {
 		rt.backends = append(rt.backends, newProxiedBackend("via-oracle2", *oracle2ProxyURL))

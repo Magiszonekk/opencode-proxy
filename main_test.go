@@ -155,3 +155,42 @@ func TestProxiedBackendAcceptsSocks5(t *testing.T) {
 		t.Fatalf("proxy=%v err=%v", u, err)
 	}
 }
+
+// IPv4 twins: the request URL host becomes the A record, Host/SNI stay the name.
+type hostRecorder struct {
+	urlHost, host string
+}
+
+func (h *hostRecorder) RoundTrip(r *http.Request) (*http.Response, error) {
+	h.urlHost, h.host = r.URL.Host, r.Host
+	return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("x"))}, nil
+}
+
+func TestIPv4TwinUsesARecordAndKeepsHost(t *testing.T) {
+	cooldown = time.Minute
+	old := lookupIPv4
+	lookupIPv4 = func(string) (string, error) { return "203.0.113.7", nil }
+	defer func() { lookupIPv4 = old; v4Addr = "" }()
+	v4Addr = ""
+	d, _ := mk("direct", 0, 429)
+	rec := &hostRecorder{}
+	v4 := &backend{name: "direct-v4", client: &http.Client{Transport: rec}, ipv4: true}
+	if got := serve(newRouter(d, v4)); got != 200 {
+		t.Fatalf("want 200 via direct-v4, got %d", got)
+	}
+	if rec.urlHost != "203.0.113.7:443" || rec.host != "upstream.invalid" {
+		t.Fatalf("url host=%q host=%q", rec.urlHost, rec.host)
+	}
+}
+
+func TestIPv4TwinBackendConfig(t *testing.T) {
+	b := newIPv4Backend("via-ovh-v4", "http://127.0.0.1:1", "opencode.ai")
+	tr := b.client.Transport.(*http.Transport)
+	if !b.ipv4 || tr.TLSClientConfig.ServerName != "opencode.ai" || tr.Proxy == nil || !tr.ForceAttemptHTTP2 {
+		t.Fatalf("bad twin config: ipv4=%v sni=%q", b.ipv4, tr.TLSClientConfig.ServerName)
+	}
+	d := newIPv4Backend("direct-v4", "", "opencode.ai")
+	if d.client.Transport.(*http.Transport).DialContext == nil {
+		t.Fatal("direct-v4 must use a tcp4 dialer")
+	}
+}

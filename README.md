@@ -16,6 +16,12 @@ It does two things:
 2. **Egress failover.** When the current egress path gets `429`, it is parked
    for `-cooldown` and the same request is retried through the next backend:
    `direct -> -ovh-proxy -> -oracle-proxy -> -oracle2-proxy -> -tor-socks`.
+   With `-ipv4-twins`, each dual-stack egress also gets an IPv4 twin right after it:
+   `direct -> direct-v4 -> via-ovh -> via-ovh-v4 -> via-oracle -> via-oracle-v4 -> ...`.
+   Zen is dual-stack, so without twins those egresses only ever leave via IPv6, and Zen
+   counts the daily free quota per IPv6 /64: the IPv4 address of each box is a separate,
+   otherwise unused quota. A twin sends the request to an A record of the upstream (Host
+   and TLS SNI stay the hostname), so even an HTTP proxy CONNECTs over IPv4.
 
 ## Current gate (measured 2026-10-14, re-verified 2026-10-17, opencode 1.18.32)
 
