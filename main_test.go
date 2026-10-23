@@ -208,3 +208,33 @@ func TestIPv4FirstOrder(t *testing.T) {
 		t.Fatalf("order %v", got)
 	}
 }
+
+func TestStatusRecordsQuotaAndLastUsed(t *testing.T) {
+	cooldown = time.Minute
+	d := &backend{name: "direct", client: &http.Client{Transport: &scripted{codes: []int{429}}}}
+	v4 := &backend{name: "direct-v4", ipv4: true, client: &http.Client{Transport: &scripted{codes: []int{200}}}}
+	rt := newRouter(d, v4)
+	rt.status = newStatusBook(rt.backends, "")
+	d.markLimited(time.Minute) // as after a real 429
+	rt.status.record("direct", 429, "m", 3600, time.Now().Add(time.Minute))
+	rt.status.record("direct-v4", 200, "m", 0, time.Time{})
+	rec := httptest.NewRecorder()
+	rt.ServeHTTP(rec, httptest.NewRequest("GET", "/__router/status", nil))
+	body := rec.Body.String()
+	for _, want := range []string{`"last_used":"direct-v4"`, `"family":"ipv4"`, `"family":"ipv6"`, `"quota_until":{"m":`, `"next":"direct-v4"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("status missing %s: %s", want, body)
+		}
+	}
+}
+
+func TestStatusPersistsAcrossRestart(t *testing.T) {
+	f := t.TempDir() + "/st.json"
+	bs := []*backend{{name: "direct"}, {name: "direct-v4", ipv4: true}}
+	a := newStatusBook(bs, f)
+	a.record("direct", 429, "m", 7200, time.Time{})
+	b := newStatusBook(bs, f)
+	if _, ok := b.stats["direct"].QuotaUntil["m"]; !ok || b.stats["direct"].R429Today != 1 {
+		t.Fatalf("not restored: %+v", b.stats["direct"])
+	}
+}

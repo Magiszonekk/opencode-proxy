@@ -171,6 +171,7 @@ func newTorBackend(socksAddr string, attempts int) *backend {
 type router struct {
 	upstream *url.URL
 	backends []*backend // priority order; first available wins
+	status   *statusBook
 }
 
 func (rt *router) orderedBackends(now time.Time) []*backend {
@@ -190,6 +191,10 @@ func (rt *router) orderedBackends(now time.Time) []*backend {
 }
 
 func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/__router/status" && rt.status != nil {
+		rt.serveStatus(w)
+		return
+	}
 	var bodyBytes []byte
 	if r.Body != nil {
 		var err error
@@ -300,6 +305,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 160))
 			resp.Body.Close()
 			log.Printf("[%s] %d on attempt %d/%d, retrying on a new circuit: model=%s body=%q", b.name, resp.StatusCode, t.n, b.attempts, modelOf(bodyBytes), snippet)
+			rt.status.record(b.name, resp.StatusCode, modelOf(bodyBytes), 0, time.Time{})
 			continue
 		}
 
@@ -311,6 +317,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// which no amount of egress rotation can fix.
 			log.Printf("[%s] 429 model=%s%s body=%q", b.name, modelOf(bodyBytes), limitHeaders(resp.Header), snippet)
 			b.markLimited(cooldown)
+			rt.status.record(b.name, resp.StatusCode, modelOf(bodyBytes), retryAfterSeconds(resp.Header), time.Now().Add(cooldown))
 			continue
 		}
 
@@ -321,6 +328,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			resp.Body.Close()
 			log.Printf("[%s] %s %s -> %d%s model=%s%s body=%q", b.name, r.Method, r.URL.Path, resp.StatusCode,
 				zenTag(zenApplied), modelOf(bodyBytes), limitHeaders(resp.Header), truncate(errBody, 160))
+			rt.status.record(b.name, resp.StatusCode, modelOf(bodyBytes), retryAfterSeconds(resp.Header), time.Time{})
 			for k, vv := range resp.Header {
 				if strings.EqualFold(k, "Content-Length") {
 					continue
@@ -335,6 +343,9 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		log.Printf("[%s] %s %s -> %d%s", b.name, r.Method, r.URL.Path, resp.StatusCode, zenTag(zenApplied))
+		if zenApplied {
+			rt.status.record(b.name, resp.StatusCode, modelOf(bodyBytes), 0, time.Time{})
+		}
 
 		// The gate forced stream:true upstream. If the caller wanted a plain
 		// JSON body, fold the SSE events back into one object.
@@ -463,6 +474,7 @@ func main() {
 	torSocks := flag.String("tor-socks", "", "Tor SOCKS5 address (e.g. 127.0.0.1:9050) used as the LAST egress backend, new circuit per request; skipped if empty")
 	torAttempts := flag.Int("tor-attempts", 3, "how many fresh Tor circuits to try before giving up")
 	ipv4Twins := flag.Bool("ipv4-twins", false, "after each of direct / -ovh-proxy / -oracle-proxy, also try the same egress forced to IPv4 (direct-v4, via-ovh-v4, via-oracle-v4): a dual-stack egress otherwise only ever uses its IPv6 address")
+	stateFile := flag.String("state-file", "", "persist per-egress status (served at /__router/status) to this JSON file; empty = memory only")
 	ipv4First := flag.Bool("ipv4-first", false, "with -ipv4-twins: try every IPv4 egress (the twins and -oracle2-proxy) before the IPv6 ones; Tor stays last")
 	testOnly := flag.String("test-only-backend", "", "debug: route everything through this one backend (direct|direct-v4|via-ovh|via-ovh-v4|via-oracle|via-oracle-v4|via-oracle2|via-tor)")
 	flag.Parse()
@@ -511,6 +523,8 @@ func main() {
 		}
 		rt.backends = keep
 	}
+
+	rt.status = newStatusBook(rt.backends, *stateFile)
 
 	names := make([]string, 0, len(rt.backends))
 	for _, b := range rt.backends {
