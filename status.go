@@ -108,7 +108,10 @@ func (sb *statusBook) record(name string, code int, model string, retryAfter int
 	case code >= 200 && code < 300:
 		s.LastOK, s.LastOKModel = now, model
 		s.OKToday++
-		delete(s.QuotaUntil, model) // it answered, so this model's quota is back
+		// The quota is per egress IP, not per model (all free models hit it at
+		// once), so any 2xx proves the IP is usable again.
+		s.QuotaUntil = map[string]time.Time{}
+		s.CooldownUntil = time.Time{}
 		sb.lastUsed, sb.lastAt = name, now
 	case code == http.StatusTooManyRequests:
 		s.Last429, s.Last429Model = now, model

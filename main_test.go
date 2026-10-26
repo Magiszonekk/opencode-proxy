@@ -238,3 +238,13 @@ func TestStatusPersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("not restored: %+v", b.stats["direct"])
 	}
 }
+
+func TestStatusOKClearsWholeQuota(t *testing.T) {
+	sb := newStatusBook([]*backend{{name: "direct-v4", ipv4: true}}, "")
+	sb.record("direct-v4", 429, "a", 3600, time.Now().Add(time.Minute))
+	sb.record("direct-v4", 429, "b", 3600, time.Time{})
+	sb.record("direct-v4", 200, "a", 0, time.Time{})
+	if n := len(sb.stats["direct-v4"].QuotaUntil); n != 0 {
+		t.Fatalf("quota left for %d models", n)
+	}
+}
