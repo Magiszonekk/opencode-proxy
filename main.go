@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -56,7 +55,7 @@ func (b *backend) markLimited(cooldown time.Duration) {
 func newDirectBackend() *backend {
 	return &backend{
 		name:   "direct",
-		client: &http.Client{Transport: &http.Transport{}},
+		client: &http.Client{Transport: newBunTransport(&egressDialer{}, false)},
 	}
 }
 
@@ -65,23 +64,17 @@ func newDirectBackend() *backend {
 // upstreamIPv4), so an HTTP proxy CONNECTs to that address and cannot pick
 // AAAA; the direct dialer additionally only dials tcp4.
 func newIPv4Backend(name, proxyURL, serverName string) *backend {
-	tr := &http.Transport{
-		TLSClientConfig:   &tls.Config{ServerName: serverName},
-		ForceAttemptHTTP2: true,
-	}
+	d := &egressDialer{serverName: serverName}
 	if proxyURL == "" {
-		d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-		tr.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
-			return d.DialContext(ctx, "tcp4", addr)
-		}
+		d.tcp4 = true
 	} else {
 		u, err := url.Parse(proxyURL)
 		if err != nil {
 			log.Fatalf("invalid proxy url for backend %s: %v", name, err)
 		}
-		tr.Proxy = http.ProxyURL(u)
+		d.proxy = func() (*url.URL, error) { return u, nil }
 	}
-	return &backend{name: name, client: &http.Client{Transport: tr}, ipv4: true}
+	return &backend{name: name, client: &http.Client{Transport: newBunTransport(d, false)}, ipv4: true}
 }
 
 var (
@@ -143,9 +136,10 @@ func newProxiedBackend(name, proxyURL string) *backend {
 	if err != nil {
 		log.Fatalf("invalid proxy url for backend %s: %v", name, err)
 	}
+	d := &egressDialer{proxy: func() (*url.URL, error) { return u, nil }}
 	return &backend{
 		name:   name,
-		client: &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(u)}},
+		client: &http.Client{Transport: newBunTransport(d, false)},
 	}
 }
 
@@ -163,7 +157,7 @@ func newTorBackend(socksAddr string, attempts int) *backend {
 	}
 	return &backend{
 		name:     "via-tor",
-		client:   &http.Client{Transport: &http.Transport{Proxy: proxy, DisableKeepAlives: true}},
+		client:   &http.Client{Transport: newBunTransport(&egressDialer{proxy: func() (*url.URL, error) { return proxy(nil) }}, true)},
 		attempts: attempts,
 	}
 }

@@ -25,7 +25,28 @@ It does two things:
    `-ipv4-first` (prod) moves every IPv4 egress ahead of the IPv6 ones:
    `direct-v4 -> via-ovh-v4 -> via-oracle-v4 -> via-oracle2 -> direct -> via-ovh -> via-oracle -> via-tor`.
 
-## Current gate (measured 2026-10-14, re-verified 2026-10-17, opencode 1.18.32)
+## Current gate (revision 2026-10-26)
+
+Zen started answering EVERY request from this router with
+`429 FreeUsageLimitError` ("Free usage limit reached. Free models work in
+OpenCode...") on every egress IP, while a real `opencode run` from the same
+host got 200. The 429 is a disguised gate rejection, not quota. Bisected with a
+replay through opencode's bundled Bun and a Go uTLS client; both are needed:
+
+1. **TLS fingerprint of Bun** (ja3 `d871d02cecbde59abbf8f4806134addf`, ALPN
+   `http/1.1` only). curl and Go `crypto/tls` (h1 or h2) get the fake 429 with an
+   identical body. `tlsdial.go` now does every upstream handshake with
+   `refraction-networking/utls` and Bun's ClientHello, and handles the proxy hop
+   (HTTP CONNECT / SOCKS5) itself, because `http.Transport` with `Proxy` set does
+   its own TLS and would bypass uTLS.
+2. **An opencode `<env>...</env>` block in a system message.** Empty block, plain
+   system prompt, or the block in a user message -> fake 429. `envgate.go`
+   appends it to the first system message (or inserts one) for free-tier models.
+
+Headers (`User-Agent`, `x-opencode-*`, the `Authorization: Bearer public` opencode
+now sends) and the new `/inference/openai/v1` path are not checked beyond that.
+
+, re-verified 2026-10-17, opencode 1.18.32)
 
 Found by capturing a real opencode request and replaying it with one field
 removed at a time:

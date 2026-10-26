@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 )
 
 // zenCompactionPrompt is OpenCode's compaction system prompt. It must be sent
@@ -245,11 +246,12 @@ func rewriteZenBody(body []byte) (out []byte, clientWantedStream bool, applied b
 		// main.go). Messages pass through untouched.
 		_, callerHadTools := root["tools"]
 		ensureGateTools(root, false)
+		ensureEnvBlock(root, time.Now())
 		if !callerHadTools {
 			// The stubs exist only for the gate; forbid the model from calling them.
 			root["tool_choice"] = json.RawMessage(`"none"`)
 		}
-		rebuilt, err := json.Marshal(root)
+		rebuilt, err := marshalRaw(root)
 		if err != nil {
 			return body, clientWantedStream, false
 		}

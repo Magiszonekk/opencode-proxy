@@ -146,13 +146,13 @@ func TestOracle2BeforeTor(t *testing.T) {
 	}
 }
 
-// A socks5:// URL is accepted for proxied backends.
+// A socks5:// URL is accepted for proxied backends; the proxy hop lives in the
+// uTLS dialer (Transport.Proxy must stay nil or Go would do plain TLS itself).
 func TestProxiedBackendAcceptsSocks5(t *testing.T) {
 	b := newProxiedBackend("via-oracle2", "socks5://127.0.0.1:1")
-	req, _ := http.NewRequest("GET", "https://example.invalid/", nil)
-	u, err := b.client.Transport.(*http.Transport).Proxy(req)
-	if err != nil || u.Scheme != "socks5" {
-		t.Fatalf("proxy=%v err=%v", u, err)
+	tr := b.client.Transport.(*http.Transport)
+	if tr.Proxy != nil || tr.DialTLSContext == nil {
+		t.Fatalf("want uTLS dialer and no Transport.Proxy")
 	}
 }
 
@@ -186,12 +186,12 @@ func TestIPv4TwinUsesARecordAndKeepsHost(t *testing.T) {
 func TestIPv4TwinBackendConfig(t *testing.T) {
 	b := newIPv4Backend("via-ovh-v4", "http://127.0.0.1:1", "opencode.ai")
 	tr := b.client.Transport.(*http.Transport)
-	if !b.ipv4 || tr.TLSClientConfig.ServerName != "opencode.ai" || tr.Proxy == nil || !tr.ForceAttemptHTTP2 {
-		t.Fatalf("bad twin config: ipv4=%v sni=%q", b.ipv4, tr.TLSClientConfig.ServerName)
+	if !b.ipv4 || tr.Proxy != nil || tr.DialTLSContext == nil || tr.ForceAttemptHTTP2 {
+		t.Fatalf("bad twin config")
 	}
 	d := newIPv4Backend("direct-v4", "", "opencode.ai")
-	if d.client.Transport.(*http.Transport).DialContext == nil {
-		t.Fatal("direct-v4 must use a tcp4 dialer")
+	if d.client.Transport.(*http.Transport).DialTLSContext == nil {
+		t.Fatal("direct-v4 must use the uTLS dialer")
 	}
 }
 
