@@ -176,6 +176,18 @@ func (rt *router) serveStatus(w http.ResponseWriter) {
 	snap["now"] = now
 	snap["next"] = next
 	snap["order"] = sb.order
+	if so := rt.soStatus; so != nil {
+		soNext := ""
+		for _, b := range rt.orderedBackendsIn(poolSystemOne, now) {
+			soNext = b.name
+			break
+		}
+		so.mu.Lock()
+		soSnap := so.snapshotLocked()
+		so.mu.Unlock()
+		soSnap["next"] = soNext
+		snap["systemone"] = soSnap
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(snap)

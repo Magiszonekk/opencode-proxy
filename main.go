@@ -27,6 +27,8 @@ type backend struct {
 	client       *http.Client
 	mu           sync.Mutex
 	limitedUntil time.Time
+	// soLimitedUntil: 429 cooldown for the systemone pool (see systemone.go).
+	soLimitedUntil time.Time
 	// attempts > 1 retries a 429 on the same backend; only useful when every
 	// attempt leaves from a different IP (Tor, one fresh circuit per request).
 	attempts int
@@ -166,13 +168,18 @@ type router struct {
 	upstream *url.URL
 	backends []*backend // priority order; first available wins
 	status   *statusBook
+	soStatus *statusBook // systemone pool; nil = not tracked
 }
 
 func (rt *router) orderedBackends(now time.Time) []*backend {
+	return rt.orderedBackendsIn(poolChat, now)
+}
+
+func (rt *router) orderedBackendsIn(pool string, now time.Time) []*backend {
 	ordered := make([]*backend, 0, len(rt.backends))
 	skipped := make([]*backend, 0, len(rt.backends))
 	for _, b := range rt.backends {
-		if b.available(now) {
+		if b.availableIn(pool, now) {
 			ordered = append(ordered, b)
 		} else {
 			skipped = append(skipped, b)
@@ -228,8 +235,15 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	target.Path = strings.TrimRight(rt.upstream.Path, "/") + r.URL.Path
 	target.RawQuery = r.URL.RawQuery
 
+	// Decision models live outside /zen/v1 and have their own 429 pool.
+	pool, st, tag := poolChat, rt.status, zenTag(zenApplied)
+	if isSystemOneRequest(r.URL.Path) {
+		pool, st, tag = poolSystemOne, rt.soStatus, " (systemone)"
+		target = systemOneTarget(rt.upstream, r.URL.RawQuery)
+	}
+
 	now := time.Now()
-	backends := rt.orderedBackends(now)
+	backends := rt.orderedBackendsIn(pool, now)
 
 	// Flatten backends into attempts: a backend with attempts=N (Tor) is tried
 	// up to N times, each time on a fresh circuit.
@@ -272,6 +286,9 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.Header = r.Header.Clone()
 		req.Host = rt.upstream.Host
 
+		if pool == poolSystemOne {
+			req.Header.Set("User-Agent", systemOneUA)
+		}
 		if zenApplied {
 			sessionID, errSession := newZenDescendingSessionID()
 			if errSession != nil {
@@ -299,7 +316,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 160))
 			resp.Body.Close()
 			log.Printf("[%s] %d on attempt %d/%d, retrying on a new circuit: model=%s body=%q", b.name, resp.StatusCode, t.n, b.attempts, modelOf(bodyBytes), snippet)
-			rt.status.record(b.name, resp.StatusCode, modelOf(bodyBytes), 0, time.Time{})
+			st.record(b.name, resp.StatusCode, modelOf(bodyBytes), 0, time.Time{})
 			continue
 		}
 
@@ -309,9 +326,9 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Log WHY: the body tells an IP rate limit apart from provider
 			// overload ("Upstream request failed: Endpoint is unavailable"),
 			// which no amount of egress rotation can fix.
-			log.Printf("[%s] 429 model=%s%s body=%q", b.name, modelOf(bodyBytes), limitHeaders(resp.Header), snippet)
-			b.markLimited(cooldown)
-			rt.status.record(b.name, resp.StatusCode, modelOf(bodyBytes), retryAfterSeconds(resp.Header), time.Now().Add(cooldown))
+			log.Printf("[%s] 429%s model=%s%s body=%q", b.name, tag, modelOf(bodyBytes), limitHeaders(resp.Header), snippet)
+			b.markLimitedIn(pool, cooldown)
+			st.record(b.name, resp.StatusCode, modelOf(bodyBytes), retryAfterSeconds(resp.Header), time.Now().Add(cooldown))
 			continue
 		}
 
@@ -321,8 +338,8 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
 			log.Printf("[%s] %s %s -> %d%s model=%s%s body=%q", b.name, r.Method, r.URL.Path, resp.StatusCode,
-				zenTag(zenApplied), modelOf(bodyBytes), limitHeaders(resp.Header), truncate(errBody, 160))
-			rt.status.record(b.name, resp.StatusCode, modelOf(bodyBytes), retryAfterSeconds(resp.Header), time.Time{})
+				tag, modelOf(bodyBytes), limitHeaders(resp.Header), truncate(errBody, 160))
+			st.record(b.name, resp.StatusCode, modelOf(bodyBytes), retryAfterSeconds(resp.Header), time.Time{})
 			for k, vv := range resp.Header {
 				if strings.EqualFold(k, "Content-Length") {
 					continue
@@ -336,9 +353,9 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("[%s] %s %s -> %d%s", b.name, r.Method, r.URL.Path, resp.StatusCode, zenTag(zenApplied))
-		if zenApplied {
-			rt.status.record(b.name, resp.StatusCode, modelOf(bodyBytes), 0, time.Time{})
+		log.Printf("[%s] %s %s -> %d%s", b.name, r.Method, r.URL.Path, resp.StatusCode, tag)
+		if zenApplied || pool == poolSystemOne {
+			st.record(b.name, resp.StatusCode, modelOf(bodyBytes), 0, time.Time{})
 		}
 
 		// The gate forced stream:true upstream. If the caller wanted a plain
@@ -470,10 +487,12 @@ func main() {
 	ipv4Twins := flag.Bool("ipv4-twins", false, "after each of direct / -ovh-proxy / -oracle-proxy, also try the same egress forced to IPv4 (direct-v4, via-ovh-v4, via-oracle-v4): a dual-stack egress otherwise only ever uses its IPv6 address")
 	stateFile := flag.String("state-file", "", "persist per-egress status (served at /__router/status) to this JSON file; empty = memory only")
 	ipv4First := flag.Bool("ipv4-first", false, "with -ipv4-twins: try every IPv4 egress (the twins and -oracle2-proxy) before the IPv6 ones; Tor stays last")
+	soPath := flag.String("systemone-path", systemOnePath, "upstream path (on the -upstream host) for decision-model requests sent to /v1/systemone; Zen serves them outside /zen/v1")
 	testOnly := flag.String("test-only-backend", "", "debug: route everything through this one backend (direct|direct-v4|via-ovh|via-ovh-v4|via-oracle|via-oracle-v4|via-oracle2|via-tor)")
 	flag.Parse()
 
 	cooldown = *cooldownFlag
+	systemOnePath = *soPath
 
 	upstream, err := url.Parse(*upstreamURL)
 	if err != nil {
@@ -519,6 +538,11 @@ func main() {
 	}
 
 	rt.status = newStatusBook(rt.backends, *stateFile)
+	soFile := ""
+	if *stateFile != "" {
+		soFile = strings.TrimSuffix(*stateFile, ".json") + ".systemone.json"
+	}
+	rt.soStatus = newStatusBook(rt.backends, soFile)
 
 	names := make([]string, 0, len(rt.backends))
 	for _, b := range rt.backends {
