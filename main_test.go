@@ -248,3 +248,10 @@ func TestStatusOKClearsWholeQuota(t *testing.T) {
 		t.Fatalf("quota left for %d models", n)
 	}
 }
+
+// Gate 2026-11-09: a bare "opencode/<ver>" UA is rejected with a fake 429.
+func TestZenUserAgentHasRuntimeSuffix(t *testing.T) {
+	if !strings.HasPrefix(zenUserAgent, "opencode/") || !strings.Contains(zenUserAgent, " runtime/bun/") {
+		t.Fatalf("zenUserAgent %q must be the full CLI UA (opencode/<ver> ai-sdk/... runtime/bun/...)", zenUserAgent)
+	}
+}
