@@ -296,7 +296,7 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			req.Header.Set("x-opencode-session", sessionID)
-			req.Header.Set("User-Agent", zenUserAgent)
+			req.Header.Set("User-Agent", zenUserAgent())
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Accept", "text/event-stream")
 			req.ContentLength = int64(len(bodyBytes))
@@ -489,10 +489,14 @@ func main() {
 	ipv4First := flag.Bool("ipv4-first", false, "with -ipv4-twins: try every IPv4 egress (the twins and -oracle2-proxy) before the IPv6 ones; Tor stays last")
 	soPath := flag.String("systemone-path", systemOnePath, "upstream path (on the -upstream host) for decision-model requests sent to /v1/systemone; Zen serves them outside /zen/v1")
 	testOnly := flag.String("test-only-backend", "", "debug: route everything through this one backend (direct|direct-v4|via-ovh|via-ovh-v4|via-oracle|via-oracle-v4|via-oracle2|via-tor)")
+	zenUA := flag.String("zen-ua", "", "free-tier path: override the whole upstream User-Agent (debug); empty = opencode/<version> + CLI ai-sdk/bun suffix")
+	zenUAVersion := flag.String("zen-ua-version", "", "free-tier path: pin the client version in the User-Agent (disables the npm refresh)")
+	zenUARefresh := flag.Bool("zen-ua-refresh", true, "follow npm opencode-ai latest (same major) for the User-Agent version; Zen rejects clients below a minimum version (426)")
 	flag.Parse()
 
 	cooldown = *cooldownFlag
 	systemOnePath = *soPath
+	configureUA(*zenUA, *zenUAVersion, *zenUARefresh)
 
 	upstream, err := url.Parse(*upstreamURL)
 	if err != nil {
@@ -548,7 +552,7 @@ func main() {
 	for _, b := range rt.backends {
 		names = append(names, b.name)
 	}
-	log.Printf("opencode-egress-router listening on %s, upstream=%s, backends=%s, tor-attempts=%d, cooldown=%s",
-		*listenAddr, *upstreamURL, strings.Join(names, " -> "), *torAttempts, cooldown)
+	log.Printf("opencode-egress-router listening on %s, upstream=%s, backends=%s, tor-attempts=%d, cooldown=%s, ua=%s",
+		*listenAddr, *upstreamURL, strings.Join(names, " -> "), *torAttempts, cooldown, zenUserAgent())
 	log.Fatal(http.ListenAndServe(*listenAddr, rt))
 }

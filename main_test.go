@@ -249,9 +249,28 @@ func TestStatusOKClearsWholeQuota(t *testing.T) {
 	}
 }
 
-// Gate 2026-11-09: a bare "opencode/<ver>" UA is rejected with a fake 429.
-func TestZenUserAgentHasRuntimeSuffix(t *testing.T) {
-	if !strings.HasPrefix(zenUserAgent, "opencode/") || !strings.Contains(zenUserAgent, " runtime/bun/") {
-		t.Fatalf("zenUserAgent %q must be the full CLI UA (opencode/<ver> ai-sdk/... runtime/bun/...)", zenUserAgent)
+func TestNewerSameMajor(t *testing.T) {
+	cases := []struct {
+		cur, cand string
+		want      bool
+	}{
+		{"1.18.32", "1.19.5", true}, {"2.1.1", "2.2.0", true}, {"2.1.1", "2.1.2", true}, {"2.1.1", "2.1.0", false},
+		{"2.1.1", "2.1.1", false}, {"2.1.1", "3.0.0", false}, {"2.1.1", "2.3.0-beta.1", false},
+		{"2.1.1", "garbage", false}, {"2.9.0", "2.10.0", true},
+	}
+	for _, c := range cases {
+		if got := newerSameMajor(c.cur, c.cand); got != c.want {
+			t.Errorf("newerSameMajor(%q,%q)=%v want %v", c.cur, c.cand, got, c.want)
+		}
+	}
+}
+
+// Gate 2026-11-09: a bare "opencode/<ver>" UA is rejected with a fake 429;
+// the full CLI fetch UA (with ai-sdk + bun runtime suffix) passes.
+func TestZenUserAgentShape(t *testing.T) {
+	got := zenUserAgent()
+	want := "opencode/" + uaDefaultVersion + " " + uaSuffix
+	if got != want || !strings.Contains(got, " runtime/bun/") {
+		t.Fatalf("unexpected UA %q, want %q", got, want)
 	}
 }

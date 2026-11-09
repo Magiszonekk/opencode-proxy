@@ -25,7 +25,21 @@ It does two things:
    `-ipv4-first` (prod) moves every IPv4 egress ahead of the IPv6 ones:
    `direct-v4 -> via-ovh-v4 -> via-oracle-v4 -> via-oracle2 -> direct -> via-ovh -> via-oracle -> via-tor`.
 
-## Current gate (revision 2026-10-26)
+## Current gate (revision 2026-11-09: User-Agent)
+
+On top of the 2026-10-26 gate below, Zen now rejects a bare
+`User-Agent: opencode/<version>` with the same fake `429 FreeUsageLimitError`
+(~170 ms, on every egress, including IPs idle for days). The real CLI sends
+`opencode/1.18.32 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14` and that
+passes; any suffix after the version passes, and clients below 1.18.0 get
+`426 UpgradeRequired`. `ua.go` sends `opencode/<version> <CLI suffix>`, with the
+version following npm `opencode-ai` latest (same major). Flags: `-zen-ua`
+(whole string), `-zen-ua-version` (pin), `-zen-ua-refresh=false`.
+
+Bisect trap: a session id that once got a 200 stays trusted, so replaying it
+with the bad UA still passes. Use a NEW session id for every probe.
+
+## Gate revision 2026-10-26
 
 Zen started answering EVERY request from this router with
 `429 FreeUsageLimitError` ("Free usage limit reached. Free models work in
@@ -58,7 +72,8 @@ removed at a time:
   description or schema pass, so the router appends them if missing).
 - `"stream": true` is required. Non-streaming callers still work: the router
   streams upstream and folds the SSE back into a single `chat.completion`.
-- `User-Agent` must start with `opencode/<version>`.
+- `User-Agent` must start with `opencode/<version>` (since 2026-11-09 also with a
+  suffix after the version, see above).
 - Not checked: the auth header, the system prompt, `x-opencode-client/project/request`.
 
 The rewrite applies to every model id ending in `-free` plus the explicit list
@@ -147,5 +162,6 @@ openai-compatibility:
 - `main.go`: backends, failover, flags
 - `gate.go`: current gate (descending session id, stub `bash`/`read` tools)
 - `zenfix.go`: free-model detection, request rewrite, legacy prompt-prefix gate (off)
+- `ua.go`: upstream User-Agent (CLI shape, version follows npm `opencode-ai`)
 - `sse.go`: SSE → single `chat.completion` reassembly for non-stream callers
 - `musespark.go`: Muse Spark (`/responses`) specifics
